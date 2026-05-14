@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.Python
+
+# Virtual environments — never commit these
+venv/
+.venv/
+env/
+ENV/
+
+# Test / lint / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated CLI output — created when you run:
+#   python cli.py analyze --input sample_request.json --output out.json
+out.json
+
+# Secrets and local config — never commit
+.env
+*.env
+
+# Logs
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docker build leftovers
+*.tar
