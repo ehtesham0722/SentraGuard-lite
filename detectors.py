@@ -1,12 +1,19 @@
 """
 Core detection logic — pure functions only.
-All detectors are heuristic/regex-based for offline, deterministic operation.
+
+Detection uses two distinct approaches:
+  - Phrase-list detectors (prompt injection, RAG injection): deterministic
+    substring matching against curated phrase lists. No regex — no
+    backtracking, no ReDoS surface on these paths.
+  - PII detector: compiled regex patterns for email addresses and US phone
+    numbers. Word-boundary anchors (\b) are applied to the email pattern to
+    prevent catastrophic backtracking on adversarial inputs.
 """
 import re
 from typing import List, Tuple
 
 # ---------------------------------------------------------------------------
-# Detector 1 — Prompt Injection / Jailbreak Heuristic
+# Detector 1 — Prompt Injection / Jailbreak  (substring matching, not regex)
 # ---------------------------------------------------------------------------
 INJECTION_PHRASES = [
     "ignore previous instructions",
@@ -43,7 +50,7 @@ INJECTION_PHRASES = [
 ]
 
 # ---------------------------------------------------------------------------
-# Detector 3 — RAG Injection Heuristic (scans context_docs only)
+# Detector 3 — RAG Injection  (substring matching, not regex)
 # ---------------------------------------------------------------------------
 RAG_INJECTION_PHRASES = [
     "system:",
@@ -70,10 +77,13 @@ RAG_INJECTION_PHRASES = [
 ]
 
 # ---------------------------------------------------------------------------
-# Detector 2 — PII Patterns
+# Detector 2 — PII Patterns  (compiled regex)
 # ---------------------------------------------------------------------------
-# Email: standard RFC-ish pattern
-EMAIL_PATTERN = re.compile(r"[\w.+\-]+@[\w\-]+\.[\w.]+")
+# Email: \b anchors prevent catastrophic backtracking on long strings that
+# contain many word characters but no '@'.  Without anchors, the engine
+# retries the [\w.+\-]+ alternation at every character position in a long
+# word-char run — measurably slow on adversarial 10 KB inputs.
+EMAIL_PATTERN = re.compile(r"\b[\w.+\-]+@[\w\-]+\.[\w.]+\b")
 
 # Phone: US formats — (555) 867-5309 | 555-867-5309 | +1 555 867 5309 | 555.867.5309
 # The optional country-code prefix is grouped to prevent its trailing separator
@@ -90,6 +100,7 @@ PHONE_PATTERN = re.compile(
 def detect_prompt_injection(text: str) -> Tuple[bool, List[str]]:
     """
     Check for prompt injection / jailbreak patterns in text.
+    Uses substring matching — deterministic, no ReDoS surface.
     Returns (found: bool, evidence: List[str]).
     """
     text_lower = text.lower()
@@ -130,6 +141,7 @@ def redact_pii(text: str) -> str:
 def detect_rag_injection(text: str) -> Tuple[bool, List[str]]:
     """
     Check for RAG/context-injection patterns in a document's text.
+    Uses substring matching — deterministic, no ReDoS surface.
     Returns (found: bool, evidence: List[str]).
     """
     text_lower = text.lower()

@@ -3,7 +3,11 @@ SentraGuard Lite — FastAPI entrypoint.
 Exactly 2 endpoints as specified:
   POST /analyze
   GET  /policy
+
+OpenAPI surface (docs/redoc/openapi.json) is disabled to comply with the
+'exactly 2 endpoints' constraint in the technical handbook.
 """
+import logging
 from fastapi import FastAPI
 
 from app.schemas import (
@@ -25,10 +29,21 @@ from app.core.scoring import (
     compute_risk_score,
 )
 
+# ---------------------------------------------------------------------------
+# Logging — one structured INFO line per request; never logs raw prompts or PII
+# ---------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# App — OpenAPI surface disabled (spec mandates exactly 2 endpoints)
+# ---------------------------------------------------------------------------
 app = FastAPI(
     title="SentraGuard Lite",
     description="Minimal GenAI guardrails gateway — prompt/context analysis and policy decisions.",
     version="1.0.0",
+    openapi_url=None,
+    docs_url=None,
+    redoc_url=None,
 )
 
 # ---------------------------------------------------------------------------
@@ -48,8 +63,12 @@ _POLICY = {
 def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     """
     Analyze a prompt + optional context docs.
-    Returns a policy decision with risk score, tags, reasons,
-    and sanitized outputs when decision is 'transform' or 'block'.
+
+    Sanitized outputs:
+      allow     — original content unchanged
+      transform — PII redacted; RAG-injected docs blanked
+      block     — opaque '[BLOCKED]' sentinel for all content fields;
+                  audit record captured in the structured log line.
     """
     risk_tags: list[str] = []
     reasons: list[Reason] = []
@@ -73,9 +92,8 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
 
     # ── Detector 3: RAG Injection + PII in context docs ─────────────────────
     rag_doc_results: list[tuple[ContextDoc, bool, list[str], bool]] = []
-    for doc in request.context_docs or []:
+    for doc in request.context_docs:
         rag_found, rag_evidence = detect_rag_injection(doc.text)
-        # Also check for PII inside context docs
         doc_pii_found, doc_pii_evidence = detect_pii(doc.text)
         rag_doc_results.append((doc, rag_found, rag_evidence, doc_pii_found))
         if rag_found:
@@ -103,25 +121,45 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     risk_score = compute_risk_score(triggered_detectors)
     decision = compute_decision(risk_score)
 
+    # ── Structured audit log (no raw prompt, no raw PII) ───────────────────
+    logger.info(
+        "analyze rid=%s decision=%s score=%d tags=%s",
+        request.metadata.request_id,
+        decision,
+        risk_score,
+        ",".join(risk_tags),
+    )
+
     # ── Sanitize Outputs ────────────────────────────────────────────────────
-    # Sanitization is applied for both 'transform' and 'block' decisions.
-    # 'allow' returns the original content unchanged.
-    should_sanitize = decision in ("transform", "block")
+    if decision == "block":
+        # Opaque sentinels on block — prevents callers from accidentally forwarding
+        # blocked content to downstream LLMs. Audit record is in the log above.
+        sanitized_prompt = "[BLOCKED]"
+        sanitized_docs = [
+            ContextDoc(id=doc.id, text="[BLOCKED]")
+            for doc in request.context_docs
+        ]
 
-    sanitized_prompt = redact_pii(request.prompt) if should_sanitize else request.prompt
+    elif decision == "transform":
+        sanitized_prompt = redact_pii(request.prompt)
+        sanitized_docs = []
+        for doc, rag_found, _, doc_pii_found in rag_doc_results:
+            if rag_found:
+                sanitized_docs.append(
+                    ContextDoc(id=doc.id, text="[BLOCKED: RAG injection detected]")
+                )
+            elif doc_pii_found:
+                sanitized_docs.append(
+                    ContextDoc(id=doc.id, text=redact_pii(doc.text))
+                )
+            else:
+                sanitized_docs.append(ContextDoc(id=doc.id, text=doc.text))
 
-    sanitized_docs: list[ContextDoc] = []
-    for doc, rag_found, _, doc_pii_found in rag_doc_results:
-        if should_sanitize and rag_found:
-            # Blank out the entire doc if RAG injection was detected
-            sanitized_docs.append(
-                ContextDoc(id=doc.id, text="[BLOCKED: RAG injection detected]")
-            )
-        elif should_sanitize and doc_pii_found:
-            # Redact PII from the doc text
-            sanitized_docs.append(ContextDoc(id=doc.id, text=redact_pii(doc.text)))
-        else:
-            sanitized_docs.append(ContextDoc(id=doc.id, text=doc.text))
+    else:  # allow
+        sanitized_prompt = request.prompt
+        sanitized_docs = [
+            ContextDoc(id=doc.id, text=doc.text) for doc in request.context_docs
+        ]
 
     return AnalyzeResponse(
         decision=decision,
